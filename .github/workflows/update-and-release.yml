@@ -1,0 +1,150 @@
+name: Update French Translations and Release to Modrinth
+
+on:
+  schedule:
+    # Run daily at 00:00 UTC
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+    inputs:
+      force_release:
+        description: 'Force a release even if no changes detected'
+        required: false
+        default: false
+        type: boolean
+      dry_run:
+        description: 'Test run without publishing to Modrinth or committing'
+        required: false
+        default: false
+        type: boolean
+
+env:
+  TRANSLATION_URL: 'https://gitlab.com/cable-mc/cobblemon/-/raw/main/common/src/main/resources/assets/cobblemon/lang/fr_fr.json?ref_type=heads'
+  GRADLE_PROPERTIES_URL: 'https://gitlab.com/cable-mc/cobblemon/-/raw/main/gradle.properties'
+  LANG_FILE: 'assets/cobblemon/lang/en_us.json'
+
+jobs:
+  update-and-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fetch latest French translation
+        run: |
+          echo "Fetching French translation from Cobblemon GitLab..."
+          curl -sSL "${{ env.TRANSLATION_URL }}" -o new_translation.json
+          
+          # Validate JSON
+          if ! jq empty new_translation.json 2>/dev/null; then
+            echo "Error: Downloaded file is not valid JSON"
+            exit 1
+          fi
+          
+          echo "Successfully downloaded translation file"
+
+      - name: Check for changes
+        id: check_changes
+        run: |
+          if [ -f "${{ env.LANG_FILE }}" ]; then
+            if diff -q new_translation.json "${{ env.LANG_FILE }}" > /dev/null 2>&1; then
+              echo "No changes detected"
+              echo "changed=false" >> $GITHUB_OUTPUT
+            else
+              echo "Changes detected in translation file"
+              echo "changed=true" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "Language file does not exist, will create it"
+            echo "changed=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Update translation file
+        if: steps.check_changes.outputs.changed == 'true' || inputs.force_release == true
+        run: |
+          mkdir -p "$(dirname "${{ env.LANG_FILE }}")"
+          cp new_translation.json "${{ env.LANG_FILE }}"
+          echo "Updated ${{ env.LANG_FILE }}"
+
+      - name: Get version info from Cobblemon
+        if: steps.check_changes.outputs.changed == 'true' || inputs.force_release == true
+        id: version
+        run: |
+          echo "Fetching version info from Cobblemon gradle.properties..."
+          curl -sSL "${{ env.GRADLE_PROPERTIES_URL }}" -o gradle.properties
+          
+          # Extract mod_version and mc_version
+          MOD_VERSION=$(grep '^mod_version=' gradle.properties | cut -d'=' -f2 | tr -d ' ')
+          MC_VERSION=$(grep '^mc_version' gradle.properties | cut -d'=' -f2 | tr -d ' ')
+          
+          echo "Cobblemon mod version: $MOD_VERSION"
+          echo "Minecraft version: $MC_VERSION"
+          
+          echo "mod_version=$MOD_VERSION" >> $GITHUB_OUTPUT
+          echo "mc_version=$MC_VERSION" >> $GITHUB_OUTPUT
+
+      - name: Commit changes
+        if: steps.check_changes.outputs.changed == 'true' && inputs.dry_run != true
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add "${{ env.LANG_FILE }}"
+          git commit -m "chore: update French translations from Cobblemon upstream"
+          git push
+
+      - name: Create resource pack ZIP
+        if: steps.check_changes.outputs.changed == 'true' || inputs.force_release == true
+        run: |
+          # Create ZIP with resource pack contents
+          zip -r cobblemon-french-${{ steps.version.outputs.mod_version }}.zip \
+            pack.mcmeta \
+            assets/ \
+            pack.png \
+            -x "*.git*" \
+            -x "*.github*"
+          
+          echo "Created resource pack: cobblemon-french-${{ steps.version.outputs.mod_version }}.zip"
+          ls -la *.zip
+
+      - name: Publish to Modrinth
+        if: (steps.check_changes.outputs.changed == 'true' || inputs.force_release == true) && inputs.dry_run != true
+        uses: Kir-Antipov/mc-publish@v3.3
+        with:
+          modrinth-id: ${{ vars.MODRINTH_PROJECT_ID }}
+          modrinth-token: ${{ secrets.MODRINTH_TOKEN }}
+          
+          files: cobblemon-french-${{ steps.version.outputs.mod_version }}.zip
+          
+          name: Cobblemon French v${{ steps.version.outputs.mod_version }}
+          version: ${{ steps.version.outputs.mod_version }}
+          version-type: release
+          
+          # Loader compatibility - resource packs work with all loaders
+          loaders: |
+            minecraft
+          
+          # Game version from Cobblemon's gradle.properties
+          game-versions: |
+            ${{ steps.version.outputs.mc_version }}
+          
+          changelog: |
+            Automatic update of French translations from Cobblemon upstream.
+            
+            Cobblemon version: ${{ steps.version.outputs.mod_version }}
+            Minecraft version: ${{ steps.version.outputs.mc_version }}
+
+      - name: Summary
+        if: steps.check_changes.outputs.changed == 'true' || inputs.force_release == true
+        run: |
+          echo "## Release Summary" >> $GITHUB_STEP_SUMMARY
+          echo "- **Pack Version**: ${{ steps.version.outputs.mod_version }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Minecraft Version**: ${{ steps.version.outputs.mc_version }}" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ inputs.dry_run }}" == "true" ]; then
+            echo "- **Mode**: 🧪 DRY RUN (no commit, no Modrinth publish)" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "- **Published to Modrinth**: ✅ Yes" >> $GITHUB_STEP_SUMMARY
+          fi

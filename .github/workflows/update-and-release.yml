@@ -104,11 +104,20 @@ jobs:
             pack.mcmeta \
             assets/ \
             pack.png \
+            LICENSE \
             -x "*.git*" \
             -x "*.github*"
           
           echo "Created resource pack: cobblemon-french-${{ steps.version.outputs.mod_version }}.zip"
           ls -la *.zip
+
+      - name: Upload artifact for review
+        if: steps.check_changes.outputs.changed == 'true' || inputs.force_release == true
+        uses: actions/upload-artifact@v4
+        with:
+          name: cobblemon-french-${{ steps.version.outputs.mod_version }}
+          path: cobblemon-french-${{ steps.version.outputs.mod_version }}.zip
+          retention-days: 7
 
       - name: Publish to Modrinth
         if: (steps.check_changes.outputs.changed == 'true' || inputs.force_release == true) && inputs.dry_run != true

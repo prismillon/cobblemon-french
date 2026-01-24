@@ -2,7 +2,6 @@ name: Update French Translations and Release to Modrinth
 
 on:
   schedule:
-    # Run daily at 00:00 UTC
     - cron: '0 0 * * *'
   workflow_dispatch:
     inputs:
@@ -87,6 +86,43 @@ jobs:
           echo "mod_version=$MOD_VERSION" >> $GITHUB_OUTPUT
           echo "mc_version=$MC_VERSION" >> $GITHUB_OUTPUT
 
+      - name: Fetch upstream changelog
+        if: steps.check_changes.outputs.changed == 'true' || inputs.force_release == true
+        id: changelog
+        run: |
+          echo "Fetching commits for French translation file since last sync..."
+          
+          # Get the date of the last commit in this repo (last sync)
+          LAST_SYNC_DATE=$(git log -1 --format=%cI 2>/dev/null || echo "")
+          
+          if [ -n "$LAST_SYNC_DATE" ]; then
+            echo "Last sync date: $LAST_SYNC_DATE"
+            SINCE_PARAM="&since=$LAST_SYNC_DATE"
+          else
+            echo "No previous commits found, fetching last 5 commits"
+            SINCE_PARAM=""
+          fi
+          
+          # Fetch commits that modified the French translation file since last sync
+          COMMITS_JSON=$(curl -sSL "https://gitlab.com/api/v4/projects/cable-mc%2Fcobblemon/repository/commits?path=common/src/main/resources/assets/cobblemon/lang/fr_fr.json&per_page=20${SINCE_PARAM}")
+          
+          # Extract commit messages and format as changelog
+          CHANGELOG=$(echo "$COMMITS_JSON" | jq -r '.[] | "- \(.title) (\(.short_id))"' 2>/dev/null | head -10)
+          
+          if [ -z "$CHANGELOG" ] || [ "$CHANGELOG" = "null" ]; then
+            CHANGELOG="- Translation sync from upstream"
+          fi
+          
+          echo "Generated changelog:"
+          echo "$CHANGELOG"
+          
+          # Store changelog in output (using delimiter for multiline)
+          {
+            echo 'changelog<<EOF'
+            echo "$CHANGELOG"
+            echo 'EOF'
+          } >> $GITHUB_OUTPUT
+
       - name: Commit changes
         if: steps.check_changes.outputs.changed == 'true' && inputs.dry_run != true
         run: |
@@ -132,19 +168,19 @@ jobs:
           version: ${{ steps.version.outputs.mod_version }}
           version-type: release
           
-          # Loader compatibility - resource packs work with all loaders
           loaders: |
             minecraft
           
-          # Game version from Cobblemon's gradle.properties
           game-versions: |
             ${{ steps.version.outputs.mc_version }}
           
           changelog: |
-            Automatic update of French translations from Cobblemon upstream.
+            ## French Translation Update
             
-            Cobblemon version: ${{ steps.version.outputs.mod_version }}
-            Minecraft version: ${{ steps.version.outputs.mc_version }}
+            Synced with Cobblemon v${{ steps.version.outputs.mod_version }} for Minecraft ${{ steps.version.outputs.mc_version }}
+            
+            ### Recent upstream changes:
+            ${{ steps.changelog.outputs.changelog }}
 
       - name: Summary
         if: steps.check_changes.outputs.changed == 'true' || inputs.force_release == true

@@ -149,7 +149,7 @@ jobs:
 
       - name: Upload artifact for review
         if: steps.check_changes.outputs.changed == 'true' || inputs.force_release == true
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: cobblemon-french-${{ steps.version.outputs.mod_version }}
           path: cobblemon-french-${{ steps.version.outputs.mod_version }}.zip

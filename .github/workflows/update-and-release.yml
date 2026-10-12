@@ -1,195 +1,268 @@
-name: Update French Translations and Release to Modrinth
+name: Release French Translations matching Cobblemon
 
 on:
   schedule:
+    # Daily check: publish only when Cobblemon itself has a new release.
     - cron: '0 0 * * *'
   workflow_dispatch:
     inputs:
-      force_release:
-        description: 'Force a release even if no changes detected'
+      dry_run:
+        description: 'Run the full pipeline without committing, tagging or publishing'
         required: false
         default: false
         type: boolean
-      dry_run:
-        description: 'Test run without publishing to Modrinth or committing'
+      force_release:
+        description: 'Re-publish the current Cobblemon version even if already published'
         required: false
         default: false
         type: boolean
 
 env:
-  TRANSLATION_URL: 'https://gitlab.com/cable-mc/cobblemon/-/raw/main/common/src/main/resources/assets/cobblemon/lang/fr_fr.json?ref_type=heads'
-  GRADLE_PROPERTIES_URL: 'https://gitlab.com/cable-mc/cobblemon/-/raw/main/gradle.properties'
+  COBBLEMON_SLUG: 'cobblemon'
+  PACK_SLUG: 'cobblemon-french'
+  MODRINTH_API: 'https://api.modrinth.com/v2'
+  GITLAB_API: 'https://gitlab.com/api/v4/projects/cable-mc%2Fcobblemon'
+  GITLAB_RAW: 'https://gitlab.com/cable-mc/cobblemon/-/raw'
+  LANG_PATH: 'common/src/main/resources/assets/cobblemon/lang'
   LANG_FILE: 'assets/cobblemon/lang/en_us.json'
 
 jobs:
-  update-and-release:
+  release:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-    
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
-      - name: Fetch latest French translation
+      - name: Resolve latest official Cobblemon release
+        id: upstream
         run: |
-          echo "Fetching French translation from Cobblemon GitLab..."
-          curl -sSL "${{ env.TRANSLATION_URL }}" -o new_translation.json
-          
-          # Validate JSON
-          if ! jq empty new_translation.json 2>/dev/null; then
-            echo "Error: Downloaded file is not valid JSON"
+          set -euo pipefail
+
+          echo "Querying Modrinth for the latest Cobblemon release..."
+          LATEST=$(curl -sSL --fail --retry 3 "$MODRINTH_API/project/$COBBLEMON_SLUG/version" \
+            | jq -c '[.[] | select(.version_type == "release")] | sort_by(.date_published) | last')
+
+          if [ -z "$LATEST" ] || [ "$LATEST" = "null" ]; then
+            echo "::error::Could not determine the latest Cobblemon release from Modrinth"
             exit 1
           fi
-          
-          echo "Successfully downloaded translation file"
 
-      - name: Check for changes
-        id: check_changes
+          VERSION=$(echo "$LATEST" | jq -r '.version_number')
+          MC_VERSIONS=$(echo "$LATEST" | jq -r '.game_versions | join(", ")')
+
+          if [ -z "$VERSION" ] || [ "$VERSION" = "null" ]; then
+            echo "::error::Modrinth returned a release without a version number"
+            exit 1
+          fi
+
+          echo "Latest Cobblemon release: $VERSION (Minecraft $MC_VERSIONS)"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "mc_versions=$MC_VERSIONS" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve last published pack version
+        id: pack
         run: |
-          if [ -f "${{ env.LANG_FILE }}" ]; then
-            if diff -q new_translation.json "${{ env.LANG_FILE }}" > /dev/null 2>&1; then
-              echo "No changes detected"
-              echo "changed=false" >> $GITHUB_OUTPUT
-            else
-              echo "Changes detected in translation file"
-              echo "changed=true" >> $GITHUB_OUTPUT
-            fi
+          set -euo pipefail
+
+          PUBLISHED=$(curl -sSL --fail --retry 3 "$MODRINTH_API/project/$PACK_SLUG/version" \
+            | jq -r 'sort_by(.date_published) | (last // {}) | .version_number // "none"')
+
+          echo "Last published pack version: $PUBLISHED"
+          echo "version=$PUBLISHED" >> "$GITHUB_OUTPUT"
+
+      - name: Decide whether a release is needed
+        id: decide
+        env:
+          UPSTREAM_VERSION: ${{ steps.upstream.outputs.version }}
+          PUBLISHED_VERSION: ${{ steps.pack.outputs.version }}
+          DRY_RUN: ${{ inputs.dry_run || 'false' }}
+          FORCE: ${{ inputs.force_release || 'false' }}
+        run: |
+          set -euo pipefail
+
+          if [ "$DRY_RUN" = "true" ]; then
+            echo "Dry run: exercising the pipeline without publishing."
+            RELEASE=true
+          elif [ "$FORCE" = "true" ]; then
+            echo "Force release requested."
+            RELEASE=true
+          elif [ "$UPSTREAM_VERSION" = "$PUBLISHED_VERSION" ]; then
+            echo "Pack $PUBLISHED_VERSION already matches Cobblemon $UPSTREAM_VERSION - nothing to publish."
+            RELEASE=false
           else
-            echo "Language file does not exist, will create it"
-            echo "changed=true" >> $GITHUB_OUTPUT
+            echo "Cobblemon $UPSTREAM_VERSION is not published yet (pack is at $PUBLISHED_VERSION)."
+            RELEASE=true
           fi
 
-      - name: Update translation file
-        if: steps.check_changes.outputs.changed == 'true' || inputs.force_release == true
-        run: |
-          mkdir -p "$(dirname "${{ env.LANG_FILE }}")"
-          cp new_translation.json "${{ env.LANG_FILE }}"
-          echo "Updated ${{ env.LANG_FILE }}"
+          echo "release=$RELEASE" >> "$GITHUB_OUTPUT"
 
-      - name: Get version info from Cobblemon
-        if: steps.check_changes.outputs.changed == 'true' || inputs.force_release == true
-        id: version
+      - name: Fetch translations at the matching Cobblemon tag
+        if: steps.decide.outputs.release == 'true'
         run: |
-          echo "Fetching version info from Cobblemon gradle.properties..."
-          curl -sSL "${{ env.GRADLE_PROPERTIES_URL }}" -o gradle.properties
-          
-          # Extract mod_version and mc_version
-          MOD_VERSION=$(grep '^mod_version=' gradle.properties | cut -d'=' -f2 | tr -d ' ')
-          MC_VERSION=$(grep '^mc_version' gradle.properties | cut -d'=' -f2 | tr -d ' ')
-          
-          echo "Cobblemon mod version: $MOD_VERSION"
-          echo "Minecraft version: $MC_VERSION"
-          
-          echo "mod_version=$MOD_VERSION" >> $GITHUB_OUTPUT
-          echo "mc_version=$MC_VERSION" >> $GITHUB_OUTPUT
+          set -euo pipefail
 
-      - name: Fetch upstream changelog
-        if: steps.check_changes.outputs.changed == 'true' || inputs.force_release == true
-        id: changelog
+          TAG="${{ steps.upstream.outputs.version }}"
+
+          # The pack must ship exactly what the released mod ships: refuse to
+          # fall back to a moving branch if the tag does not exist.
+          if ! curl -sSL --fail --retry 3 -o /dev/null "$GITLAB_API/repository/tags/$TAG"; then
+            echo "::error::Cobblemon has no git tag '$TAG' - refusing to build from an unpinned source"
+            exit 1
+          fi
+
+          echo "Fetching fr_fr.json and en_us.json from Cobblemon tag $TAG..."
+          curl -sSL --fail --retry 3 "$GITLAB_RAW/$TAG/$LANG_PATH/fr_fr.json" -o new_translation.json
+          curl -sSL --fail --retry 3 "$GITLAB_RAW/$TAG/$LANG_PATH/en_us.json" -o upstream_en_us.json
+
+          if ! jq empty new_translation.json 2>/dev/null; then
+            echo "::error::Downloaded fr_fr.json is not valid JSON"
+            exit 1
+          fi
+
+          echo "French keys: $(jq 'length' new_translation.json) / English keys: $(jq 'length' upstream_en_us.json)"
+
+      - name: Report translation coverage
+        if: steps.decide.outputs.release == 'true'
+        continue-on-error: true
+        id: coverage
         run: |
-          echo "Fetching commits for French translation file since last sync..."
-          
-          # Get the date of the last commit in this repo (last sync)
-          LAST_SYNC_DATE=$(git log -1 --format=%cI 2>/dev/null || echo "")
-          
-          if [ -n "$LAST_SYNC_DATE" ]; then
-            echo "Last sync date: $LAST_SYNC_DATE"
-            SINCE_PARAM="&since=$LAST_SYNC_DATE"
+          set -euo pipefail
+
+          MISSING=$(jq -n --slurpfile fr new_translation.json --slurpfile en upstream_en_us.json \
+            '$en[0] | keys - ($fr[0] | keys) | length')
+          TOTAL=$(jq 'length' upstream_en_us.json)
+          TRANSLATED=$((TOTAL - MISSING))
+
+          echo "missing=$MISSING" >> "$GITHUB_OUTPUT"
+          echo "translated=$TRANSLATED" >> "$GITHUB_OUTPUT"
+          echo "total=$TOTAL" >> "$GITHUB_OUTPUT"
+          echo "$TRANSLATED/$TOTAL upstream strings have a French entry ($MISSING untranslated upstream)."
+
+      - name: Sync translation file into the repository
+        if: steps.decide.outputs.release == 'true'
+        id: sync
+        run: |
+          set -euo pipefail
+
+          mkdir -p "$(dirname "$LANG_FILE")"
+
+          if [ -f "$LANG_FILE" ] && diff -q new_translation.json "$LANG_FILE" > /dev/null 2>&1; then
+            echo "Translation file already matches tag ${{ steps.upstream.outputs.version }}"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
           else
-            echo "No previous commits found, fetching last 5 commits"
-            SINCE_PARAM=""
+            cp new_translation.json "$LANG_FILE"
+            echo "Updated $LANG_FILE from tag ${{ steps.upstream.outputs.version }}"
+            echo "changed=true" >> "$GITHUB_OUTPUT"
           fi
-          
-          # Fetch commits that modified the French translation file since last sync
-          COMMITS_JSON=$(curl -sSL "https://gitlab.com/api/v4/projects/cable-mc%2Fcobblemon/repository/commits?path=common/src/main/resources/assets/cobblemon/lang/fr_fr.json&per_page=20${SINCE_PARAM}")
-          
-          # Extract commit messages and format as changelog
-          CHANGELOG=$(echo "$COMMITS_JSON" | jq -r '.[] | "- \(.title) (\(.short_id))"' 2>/dev/null | head -10)
-          
-          if [ -z "$CHANGELOG" ] || [ "$CHANGELOG" = "null" ]; then
-            CHANGELOG="- Translation sync from upstream"
-          fi
-          
-          echo "Generated changelog:"
-          echo "$CHANGELOG"
-          
-          # Store changelog in output (using delimiter for multiline)
-          {
-            echo 'changelog<<EOF'
-            echo "$CHANGELOG"
-            echo 'EOF'
-          } >> $GITHUB_OUTPUT
 
-      - name: Commit changes
-        if: steps.check_changes.outputs.changed == 'true' && inputs.dry_run != true
+      - name: Commit translation changes
+        if: steps.decide.outputs.release == 'true' && steps.sync.outputs.changed == 'true' && inputs.dry_run != true
         run: |
+          set -euo pipefail
+
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add "${{ env.LANG_FILE }}"
-          git commit -m "chore: update French translations from Cobblemon upstream"
+          git add "$LANG_FILE"
+          git commit -m "chore: sync French translations with Cobblemon ${{ steps.upstream.outputs.version }}"
           git push
 
-      - name: Create resource pack ZIP
-        if: steps.check_changes.outputs.changed == 'true' || inputs.force_release == true
+      - name: Build resource pack ZIP
+        if: steps.decide.outputs.release == 'true'
         run: |
-          # Create ZIP with resource pack contents
-          zip -r cobblemon-french-${{ steps.version.outputs.mod_version }}.zip \
+          set -euo pipefail
+
+          VERSION="${{ steps.upstream.outputs.version }}"
+
+          rm -f ./*.zip
+          zip -r "cobblemon-french-$VERSION.zip" \
             pack.mcmeta \
             assets/ \
             pack.png \
             LICENSE \
             -x "*.git*" \
             -x "*.github*"
-          
-          echo "Created resource pack: cobblemon-french-${{ steps.version.outputs.mod_version }}.zip"
-          ls -la *.zip
 
-      - name: Upload artifact for review
-        if: steps.check_changes.outputs.changed == 'true' || inputs.force_release == true
+          echo "Built cobblemon-french-$VERSION.zip"
+          ls -la ./*.zip
+
+      - name: Upload artifact for inspection
+        if: steps.decide.outputs.release == 'true'
         uses: actions/upload-artifact@v7
         with:
-          name: cobblemon-french-${{ steps.version.outputs.mod_version }}
-          path: cobblemon-french-${{ steps.version.outputs.mod_version }}.zip
+          name: cobblemon-french-${{ steps.upstream.outputs.version }}
+          path: cobblemon-french-${{ steps.upstream.outputs.version }}.zip
           retention-days: 7
 
       - name: Publish to Modrinth
-        if: (steps.check_changes.outputs.changed == 'true' || inputs.force_release == true) && inputs.dry_run != true
+        if: steps.decide.outputs.release == 'true' && inputs.dry_run != true
         uses: Kir-Antipov/mc-publish@v3.3
         with:
           modrinth-id: ${{ vars.MODRINTH_PROJECT_ID }}
           modrinth-token: ${{ secrets.MODRINTH_TOKEN }}
-          
-          files: cobblemon-french-${{ steps.version.outputs.mod_version }}.zip
-          
-          name: Cobblemon French v${{ steps.version.outputs.mod_version }}
-          version: ${{ steps.version.outputs.mod_version }}
+
+          files: cobblemon-french-${{ steps.upstream.outputs.version }}.zip
+
+          name: Cobblemon French ${{ steps.upstream.outputs.version }}
+          version: ${{ steps.upstream.outputs.version }}
           version-type: release
-          
+
           loaders: |
             minecraft
-          
+
           game-versions: |
-            ${{ steps.version.outputs.mc_version }}
-          
+            ${{ steps.upstream.outputs.mc_versions }}
+
           changelog: |
-            ## French Translation Update
-            
-            Synced with Cobblemon v${{ steps.version.outputs.mod_version }} for Minecraft ${{ steps.version.outputs.mc_version }}
-            
-            ### Recent upstream changes:
-            ${{ steps.changelog.outputs.changelog }}
+            French translation pack for Cobblemon ${{ steps.upstream.outputs.version }} (Minecraft ${{ steps.upstream.outputs.mc_versions }}).
+
+            Pack version matches the Cobblemon release it is built from. Translations are taken from Cobblemon's `fr_fr.json` at tag ${{ steps.upstream.outputs.version }}.
+
+            Untranslated upstream strings: ${{ steps.coverage.outputs.missing }} of ${{ steps.coverage.outputs.total }}.
+
+      - name: Create GitHub tag and release
+        if: steps.decide.outputs.release == 'true' && inputs.dry_run != true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          VERSION="${{ steps.upstream.outputs.version }}"
+
+          if git ls-remote --exit-code --tags origin "refs/tags/$VERSION" > /dev/null 2>&1; then
+            echo "Tag $VERSION already exists - skipping GitHub release."
+            exit 0
+          fi
+
+          gh release create "$VERSION" \
+            "cobblemon-french-$VERSION.zip" \
+            --title "Cobblemon French $VERSION" \
+            --notes "French translation pack matching Cobblemon $VERSION (Minecraft ${{ steps.upstream.outputs.mc_versions }}).
+
+            Also available on Modrinth: https://modrinth.com/resourcepack/cobblemon-french/version/$VERSION"
 
       - name: Summary
-        if: steps.check_changes.outputs.changed == 'true' || inputs.force_release == true
+        if: always()
         run: |
-          echo "## Release Summary" >> $GITHUB_STEP_SUMMARY
-          echo "- **Pack Version**: ${{ steps.version.outputs.mod_version }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Minecraft Version**: ${{ steps.version.outputs.mc_version }}" >> $GITHUB_STEP_SUMMARY
-          if [ "${{ inputs.dry_run }}" == "true" ]; then
-            echo "- **Mode**: 🧪 DRY RUN (no commit, no Modrinth publish)" >> $GITHUB_STEP_SUMMARY
-          else
-            echo "- **Published to Modrinth**: ✅ Yes" >> $GITHUB_STEP_SUMMARY
+          {
+            echo "## Cobblemon French release check"
+            echo ""
+            echo "| Item | Value |"
+            echo "| --- | --- |"
+            echo "| Latest Cobblemon release | ${{ steps.upstream.outputs.version || 'unknown' }} |"
+            echo "| Last published pack | ${{ steps.pack.outputs.version || 'unknown' }} |"
+            echo "| Release needed | ${{ steps.decide.outputs.release || 'unknown' }} |"
+            echo "| Untranslated upstream strings | ${{ steps.coverage.outputs.missing || 'n/a' }} / ${{ steps.coverage.outputs.total || 'n/a' }} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "${{ steps.decide.outputs.release }}" != "true" ]; then
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "Nothing to publish: the pack already matches the latest Cobblemon release." >> "$GITHUB_STEP_SUMMARY"
+          elif [ "${{ inputs.dry_run }}" = "true" ]; then
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "Dry run: no commit, no tag, no Modrinth publish." >> "$GITHUB_STEP_SUMMARY"
           fi

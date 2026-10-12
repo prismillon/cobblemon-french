@@ -44,8 +44,8 @@ jobs:
           set -euo pipefail
 
           echo "Querying Modrinth for the latest Cobblemon release..."
-          LATEST=$(curl -sSL --fail --retry 3 "$MODRINTH_API/project/$COBBLEMON_SLUG/version" \
-            | jq -c '[.[] | select(.version_type == "release")] | sort_by(.date_published) | last')
+          ALL=$(bash .github/scripts/modrinth-versions.sh "$COBBLEMON_SLUG")
+          LATEST=$(echo "$ALL" | jq -c '[.[] | select(.version_type == "release")] | sort_by(.date_published) | last')
 
           if [ -z "$LATEST" ] || [ "$LATEST" = "null" ]; then
             echo "::error::Could not determine the latest Cobblemon release from Modrinth"
@@ -69,8 +69,12 @@ jobs:
         run: |
           set -euo pipefail
 
-          PUBLISHED=$(curl -sSL --fail --retry 3 "$MODRINTH_API/project/$PACK_SLUG/version" \
-            | jq -r 'sort_by(.date_published) | (last // {}) | .version_number // "none"')
+          # A freshly published version is not always present in the /version
+          # listing yet, so the project's version id list is used to detect and
+          # fetch anything the listing is missing. Otherwise a run right after a
+          # publish would see a stale "latest" and publish the same version twice.
+          ALL=$(bash .github/scripts/modrinth-versions.sh "$PACK_SLUG")
+          PUBLISHED=$(echo "$ALL" | jq -r 'sort_by(.date_published) | (last // {}) | .version_number // "none"')
 
           echo "Last published pack version: $PUBLISHED"
           echo "version=$PUBLISHED" >> "$GITHUB_OUTPUT"

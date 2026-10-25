@@ -61,7 +61,20 @@ jobs:
           fi
 
           echo "Latest Cobblemon release: $VERSION (Minecraft $MC_VERSIONS)"
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+          # Modrinth appends a build marker to some release numbers (1.8.3F,
+          # 1.8.3NF) while the git tag is the plain version, so the tag is
+          # resolved against the real tag list instead of trusting the number.
+          TAG=$(curl -sSL --fail --retry 3 "$GITLAB_API/repository/tags?per_page=100" \
+            | jq -r --arg v "$VERSION" '[.[].name | select(. as $t | $v | startswith($t))] | sort_by(length) | last // empty')
+
+          if [ -z "$TAG" ]; then
+            echo "::error::Cobblemon has no git tag matching release '$VERSION' - refusing to build from an unpinned source"
+            exit 1
+          fi
+
+          echo "Matching git tag: $TAG"
+          echo "version=$TAG" >> "$GITHUB_OUTPUT"
           echo "mc_versions=$MC_VERSIONS" >> "$GITHUB_OUTPUT"
 
       - name: Resolve last published pack version

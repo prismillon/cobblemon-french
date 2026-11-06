@@ -207,14 +207,6 @@ jobs:
           echo "Built cobblemon-french-$VERSION.zip"
           ls -la ./*.zip
 
-      - name: Upload artifact for inspection
-        if: steps.decide.outputs.release == 'true'
-        uses: actions/upload-artifact@v7
-        with:
-          name: cobblemon-french-${{ steps.upstream.outputs.version }}
-          path: cobblemon-french-${{ steps.upstream.outputs.version }}.zip
-          retention-days: 7
-
       - name: Publish to Modrinth
         if: steps.decide.outputs.release == 'true' && inputs.dry_run != true
         uses: Kir-Antipov/mc-publish@v3.3

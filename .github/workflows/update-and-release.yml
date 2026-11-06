@@ -28,7 +28,7 @@ env:
 
 jobs:
   release:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, neptune]
     permissions:
       contents: write
 
